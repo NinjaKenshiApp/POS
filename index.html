@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#020617" />
+  <meta name="description" content="PROPOS - Sistema de Punto de Venta Profesional" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="PROPOS" />
+  <link rel="manifest" href="./manifest.json" />
+  <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+  <title>PROPOS</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- React + ReactDOM -->
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel standalone (para transpilar JSX en el browser) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+
+  <!-- Lucide React (UMD) -->
+  <script src="https://unpkg.com/lucide-react@0.383.0/dist/umd/lucide-react.js"></script>
+
+  <style>
+    html, body, #root {
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overscroll-behavior: none;
+    }
+    /* Safe area padding for iOS notch */
+    .pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+    /* Animate-in utilities (reemplaza plugin de Tailwind) */
+    @keyframes fadeIn    { from { opacity: 0 } to { opacity: 1 } }
+    @keyframes zoomIn95  { from { transform: scale(.95); opacity: 0 } to { transform: scale(1); opacity: 1 } }
+    @keyframes slideFromTop { from { transform: translateY(-1rem); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
+    @keyframes slideFromRight { from { transform: translateX(2rem); opacity: 0 } to { transform: translateX(0); opacity: 1 } }
+    .animate-in { animation-fill-mode: both; }
+    .fade-in { animation-name: fadeIn; }
+    .zoom-in-95 { animation-name: zoomIn95; }
+    .slide-in-from-top-4 { animation-name: slideFromTop; }
+    .slide-in-from-right-8 { animation-name: slideFromRight; }
+    .duration-200 { animation-duration: 200ms; }
+    .duration-300 { animation-duration: 300ms; }
+    /* Line clamp */
+    .line-clamp-2 { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+    // Desestructurar React hooks del global
+    const { useState, useEffect, useMemo, useRef } = React;
+
+    // Lucide React icons desde UMD global
+    const {
+      ShoppingCart, Package, BarChart3, Plus, Trash2, Search,
+      Edit, FileSpreadsheet, Settings, X, Save, Truck, Filter, Receipt, Upload
+    } = LucideReact;
+
+    // ─── IndexedDB ──────────────────────────────────────────────────────────────
+    const DB_NAME = 'POS_SYSTEM_V9_STABLE';
+    const DB_VERSION = 1;
+
+    const DEFAULT_CONFIG = {
+      id: 'main',
+      storeName: 'Mi Comercio',
+      commissions: { Rappi: 30, PedidosYa: 30, Local: 0, Redes: 0 },
+      commissionIVA: { Rappi: 21, PedidosYa: 21 },
+      paymentFees: { Efectivo: 0, Transferencia: 0, Tarjeta: 5, MercadoPago: 4 },
+      paymentIVA: { Efectivo: 0, Transferencia: 0, Tarjeta: 21, MercadoPago: 21 }
+    };
+
+    const initDB = () => {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('products')) db.createObjectStore('products', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('sales')) db.createObjectStore('sales', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('config')) db.createObjectStore('config', { keyPath: 'id' });
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    };
+
+    const exportToCSV = (filename, data) => {
+      if (!data || !data.length) return;
+      const headers = Object.keys(data[0]).join(';');
+      const rows = data.map(obj =>
+        Object.values(obj).map(val => typeof val === 'string' ? `"${val.replace(/"/g, '""')}"` : val).join(';')
+      ).join('\n');
+      const csvContent = "data:text/csv;charset=utf-8,\uFEFF" + headers + "\n" + rows;
+      const encodedUri = encodeURI(csvContent);
+      const link = document.createElement("a");
+      link.setAttribute("href", encodedUri);
+      link.setAttribute("download", filename);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    };
+
+    // ─── APP PRINCIPAL ───────────────────────────────────────────────────────────
+    function App() {
+      const [activeTab, setActiveTab] = useState('pos');
+      const [products, setProducts] = useState([]);
+      const [sales, setSales] = useState([]);
+      const [config, setConfig] = useState(DEFAULT_CONFIG);
+      const [db, setDb] = useState(null);
+      const [isLoading, setIsLoading] = useState(true);
+      const [toast, setToast] = useState(null);
+      const [cart, setCart] = useState([]);
+      const [platform, setPlatform] = useState('Local');
+      const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, msg: '', onConfirm: null });
+      const [inputDialog, setInputDialog] = useState({ isOpen: false, msg: '', val: '', onConfirm: null });
+
+      const showToast = (msg, type = 'success') => {
+        setToast({ msg, type });
+        setTimeout(() => setToast(null), 3000);
+      };
+
+      useEffect(() => {
+        initDB().then(database => {
+          setDb(database);
+          const tx = database.transaction(['products', 'sales', 'config'], 'readonly');
+          tx.objectStore('products').getAll().onsuccess = (e) => setProducts(e.target.result || []);
+          tx.objectStore('sales').getAll().onsuccess = (e) => setSales(e.target.result || []);
+          tx.objectStore('config').get('main').onsuccess = (e) => {
+            if (e.target.result) {
+              setConfig({
+                ...DEFAULT_CONFIG,
+                ...e.target.result,
+                commissionIVA: e.target.result.commissionIVA || DEFAULT_CONFIG.commissionIVA,
+                paymentIVA: e.target.result.paymentIVA || DEFAULT_CONFIG.paymentIVA
+              });
+            } else {
+              const saveTx = database.transaction('config', 'readwrite');
+              saveTx.objectStore('config').add(DEFAULT_CONFIG);
+            }
+          };
+          setIsLoading(false);
+        });
+      }, []);
+
+      const syncStore = (name, data) => {
+        if (!db) return;
+        const tx = db.transaction(name, 'readwrite');
+        const store = tx.objectStore(name);
+        if (Array.isArray(data)) {
+          store.clear().onsuccess = () => data.forEach(item => store.add(item));
+        } else {
+          store.put(data);
+        }
+      };
+
+      const addToCart = (product) => {
+        if (product.stock <= 0) return showToast('Sin stock disponible', 'error');
+        setCart(prev => {
+          const existing = prev.find(x => x.product.id === product.id);
+          if (existing) {
+            if (existing.quantity >= product.stock) return prev;
+            return prev.map(x => x.product.id === product.id ? {...x, quantity: x.quantity + 1} : x);
+          }
+          return [...prev, { product, quantity: 1 }];
+        });
+      };
+
+      // Lector de Barras Global
+      useEffect(() => {
+        let barcode = '';
+        let scanTimeout;
+        const handleKeyDown = (e) => {
+          if (activeTab !== 'pos' && activeTab !== 'inventory') return;
+          if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+          if (e.key === 'Enter') {
+            if (barcode.length > 2) {
+              const product = products.find(p => p.barcode === barcode);
+              if (product) {
+                if (activeTab === 'pos') addToCart(product);
+                showToast(`Escaneado: ${product.name}`);
+              } else {
+                showToast('Producto no encontrado', 'error');
+              }
+              barcode = '';
+            }
+          } else if (e.key.length === 1) {
+            barcode += e.key;
+            clearTimeout(scanTimeout);
+            scanTimeout = setTimeout(() => { barcode = ''; }, 50);
+          }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => { window.removeEventListener('keydown', handleKeyDown); clearTimeout(scanTimeout); };
+      }, [products, activeTab]);
+
+      // Impresión Térmica 58mm
+      const handlePrint = (sale) => {
+        const printWindow = window.open('', '_blank');
+        if (!printWindow) return showToast('Las ventanas emergentes están bloqueadas por el navegador.', 'error');
+        printWindow.document.write(`
+          <html><head><title>Ticket</title><style>
+            @page { margin: 0; }
+            body { font-family: 'Courier New', Courier, monospace; width: 100%; max-width: 190px; margin: 0; padding: 8px; font-size: 11px; color: #000; box-sizing: border-box; }
+            .center { text-align: center; }
+            .hr { border-bottom: 1px dashed #000; margin: 5px 0; }
+            .flex { display: flex; justify-content: space-between; }
+            .bold { font-weight: bold; }
+            .item-row { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px; }
+            .item-col { display: flex; flex-direction: column; width: 70%; }
+          </style></head><body>
+          <div class="center">
+            <h2 style="margin:0;font-size:16px;">${config.storeName}</h2>
+            <p style="margin:3px 0;font-size:10px;">${sale.fecha}</p>
+          </div>
+          <div class="hr"></div>
+          <p style="margin:3px 0;">Cliente: ${sale.cliente}</p>
+          <p style="margin:3px 0;">Canal: ${sale.plataforma}</p>
+          <p style="margin:3px 0;">Pago: ${sale.metodo_pago}</p>
+          <div class="hr"></div>
+          ${sale.items.map(i => `
+            <div class="item-row">
+              <div class="item-col">
+                <span class="bold">${i.product.name}</span>
+                <span style="font-size:9px;">${i.quantity} x $${i.price}</span>
+              </div>
+              <span class="bold">$${i.price * i.quantity}</span>
+            </div>
+          `).join('')}
+          <div class="hr"></div>
+          <div class="flex"><span>Subtotal:</span><span>$${sale.subtotal}</span></div>
+          ${sale.descuento_aplicado > 0 ? `<div class="flex"><span>Descuento:</span><span>-$${sale.descuento_aplicado}</span></div>` : ''}
+          <div class="flex bold" style="font-size:14px;margin-top:6px;"><span>TOTAL:</span><span>$${sale.total_final}</span></div>
+          <div class="hr"></div>
+          <div class="center"><p style="font-size:10px;">¡Gracias por su compra!</p></div>
+          </body></html>
+        `);
+        printWindow.document.close();
+        printWindow.focus();
+        setTimeout(() => { printWindow.print(); }, 250);
+      };
+
+      // ─── Modales ─────────────────────────────────────────────────────────────
+      const ConfirmModal = () => {
+        if (!confirmDialog.isOpen) return null;
+        return (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full animate-in zoom-in-95 duration-200">
+              <h3 className="text-lg font-black text-slate-800 mb-2">Confirmar Acción</h3>
+              <p className="text-slate-600 text-sm mb-6">{confirmDialog.msg}</p>
+              <div className="flex gap-3 justify-end">
+                <button onClick={() => setConfirmDialog({ isOpen: false, msg: '', onConfirm: null })} className="px-4 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-lg transition-colors">Cancelar</button>
+                <button onClick={() => { confirmDialog.onConfirm(); setConfirmDialog({ isOpen: false, msg: '', onConfirm: null }); }} className="px-4 py-2 font-bold bg-red-500 text-white hover:bg-red-600 rounded-lg transition-colors shadow-lg shadow-red-500/30">Confirmar</button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      const InputModal = () => {
+        if (!inputDialog.isOpen) return null;
+        return (
+          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[200] flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl p-6 max-w-sm w-full animate-in zoom-in-95 duration-200">
+              <h3 className="text-lg font-black text-slate-800 mb-2">{inputDialog.msg}</h3>
+              <input
+                type="number"
+                autoFocus
+                className="w-full p-3 border-2 border-blue-100 focus:border-blue-500 rounded-xl mb-6 outline-none font-bold text-lg"
+                value={inputDialog.val}
+                onChange={(e) => setInputDialog({...inputDialog, val: e.target.value})}
+                placeholder="0"
+              />
+              <div className="flex gap-3 justify-end">
+                <button onClick={() => setInputDialog({ isOpen: false, msg: '', val: '', onConfirm: null })} className="px-4 py-2 font-bold text-slate-500 hover:bg-slate-100 rounded-lg transition-colors">Cancelar</button>
+                <button onClick={() => { inputDialog.onConfirm(inputDialog.val); setInputDialog({ isOpen: false, msg: '', val: '', onConfirm: null }); }} className="px-4 py-2 font-bold bg-blue-600 text-white hover:bg-blue-700 rounded-lg transition-colors shadow-lg shadow-blue-500/30">Aceptar</button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      // ─── POSView ─────────────────────────────────────────────────────────────
+      const POSView = () => {
+        const [search, setSearch] = useState('');
+        const [cat, setCat] = useState('Todas');
+        const [customer, setCustomer] = useState('Consumidor Final');
+        const [payMethod, setPayMethod] = useState('Efectivo');
+        const [discVal, setDiscVal] = useState(0);
+        const [discType, setDiscType] = useState('fixed');
+        const [saleDate, setSaleDate] = useState(() => new Date().toISOString().slice(0, 16));
+
+        const categories = ['Todas', ...new Set(products.map(p => p.category))].sort();
+
+        const getPrice = (p) => {
+          if (platform === 'PedidosYa' || platform === 'Rappi') return p.pricePlat;
+          if (platform === 'Redes') return p.priceRedes;
+          return p.priceLocal;
+        };
+
+        const groupedProducts = useMemo(() => {
+          const filtered = products.filter(p =>
+            (p.name.toLowerCase().includes(search.toLowerCase()) || p.barcode.includes(search)) &&
+            (cat === 'Todas' || p.category === cat)
+          );
+          const groups = {};
+          filtered.forEach(p => {
+            if (!groups[p.category]) groups[p.category] = [];
+            groups[p.category].push(p);
+          });
+          const sortedCats = Object.keys(groups).sort();
+          sortedCats.forEach(c => groups[c].sort((a,b) => a.name.localeCompare(b.name)));
+          return { groups, sortedCats };
+        }, [products, search, cat]);
+
+        const subtotal = cart.reduce((s, i) => s + (getPrice(i.product) * i.quantity), 0);
+        const discount = discType === 'percent' ? (subtotal * (Number(discVal) / 100)) : Number(discVal);
+        const total = Math.max(0, subtotal - discount);
+
+        const handleSell = () => {
+          if (!cart.length) return;
+          const newProducts = products.map(p => {
+            const item = cart.find(c => c.product.id === p.id);
+            return item ? { ...p, stock: p.stock - item.quantity } : p;
+          });
+          const nextTicketNumber = sales.length > 0 ? Math.max(...sales.map(s => s.ticketNumber || 0)) + 1 : 1;
+          const ticketId = `V${nextTicketNumber}`;
+          const baseComm = config.commissions[platform] || 0;
+          const ivaCommRate = config.commissionIVA?.[platform] || 0;
+          const payFee = config.paymentFees[payMethod] || 0;
+          const ivaPayRate = config.paymentIVA?.[payMethod] || 0;
+          const comision_plataforma = total * (baseComm / 100);
+          const iva_comision_plataforma = comision_plataforma * (ivaCommRate / 100);
+          const comision_metodo_pago = total * (payFee / 100);
+          const iva_comision_metodo_pago = comision_metodo_pago * (ivaPayRate / 100);
+          const totalCommissionsAndFees = comision_plataforma + iva_comision_plataforma + comision_metodo_pago + iva_comision_metodo_pago;
+          const totalCost = cart.reduce((s, i) => s + (i.product.cost * i.quantity), 0);
+          const sale = {
+            id: Date.now(), ticketNumber: nextTicketNumber, ticketId,
+            fecha: new Date(saleDate).toLocaleString(),
+            isoDate: new Date(saleDate).toISOString(),
+            cliente: customer, plataforma: platform, metodo_pago: payMethod,
+            subtotal, descuento_aplicado: discount,
+            comision_plataforma, iva_comision_plataforma,
+            comision_metodo_pago, iva_comision_metodo_pago,
+            comision_total: totalCommissionsAndFees,
+            total_final: total, costo_total: totalCost,
+            ganancia_neta: total - totalCommissionsAndFees - totalCost,
+            items: cart.map(i => ({ product: i.product, quantity: i.quantity, price: getPrice(i.product) }))
+          };
+          setProducts(newProducts);
+          const updatedSales = [...sales, sale];
+          setSales(updatedSales);
+          syncStore('products', newProducts);
+          syncStore('sales', updatedSales);
+          handlePrint(sale);
+          setCart([]); setDiscVal(0); setPlatform('Local'); setPayMethod('Efectivo'); setCustomer('Consumidor Final');
+          showToast(`Venta ${ticketId} Realizada`);
+        };
+
+        return (
+          <div className="flex flex-col lg:flex-row h-full gap-4 overflow-hidden">
+            <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+              <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+                <div className="flex-1 bg-white border rounded-xl px-4 flex items-center gap-2 shadow-sm">
+                  <Search size={18} className="text-slate-400"/>
+                  <input placeholder="Buscar producto o código..." className="w-full py-3 text-sm outline-none" value={search} onChange={e => setSearch(e.target.value)}/>
+                </div>
+                <select className="bg-white border rounded-xl p-3 sm:px-4 text-xs font-bold" value={cat} onChange={e => setCat(e.target.value)}>
+                  {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+              </div>
+              <div className="overflow-y-auto pb-6 pr-2">
+                {groupedProducts.sortedCats.map(category => (
+                  <div key={category} className="mb-6">
+                    <div className="flex items-center gap-4 mb-4">
+                      <h3 className="text-slate-500 font-black tracking-widest uppercase text-sm shrink-0">{category}</h3>
+                      <div className="h-0.5 w-full bg-slate-200/60 rounded"></div>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                      {groupedProducts.groups[category].map(p => (
+                        <button key={p.id} onClick={() => addToCart(p)} className={`bg-white p-4 rounded-xl border border-slate-100 text-left hover:border-blue-500 hover:shadow-md shadow-sm flex flex-col transition-all ${p.stock <= 0 ? 'opacity-50 grayscale' : ''}`}>
+                          <p className="font-bold text-slate-800 text-sm h-10 line-clamp-2">{p.name}</p>
+                          <div className="flex justify-between items-end mt-4 pt-2 border-t border-slate-50 w-full">
+                            <span className="text-lg font-black text-blue-600">$ {getPrice(p)}</span>
+                            <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${p.stock < 5 ? 'bg-red-100 text-red-600' : 'bg-emerald-100 text-emerald-600'}`}>Stock: {p.stock}</span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+                {groupedProducts.sortedCats.length === 0 && (
+                  <div className="text-center p-10 text-slate-400 font-bold">No se encontraron productos...</div>
+                )}
+              </div>
+            </div>
+
+            <div className="w-full lg:w-[380px] bg-white border rounded-xl shadow-lg flex flex-col overflow-hidden shrink-0 h-[50vh] lg:h-auto">
+              <div className="p-4 border-b bg-slate-50 flex justify-between items-center font-bold">
+                <span className="flex items-center gap-2"><ShoppingCart size={18} className="text-blue-600"/> Pedido Actual</span>
+                <button onClick={() => setCart([])} className="text-slate-400 hover:text-red-500 transition-colors p-1"><Trash2 size={16}/></button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">
+                {cart.map(item => (
+                  <div key={item.product.id} className="bg-slate-50 p-3 rounded-lg border flex flex-col gap-2 relative group">
+                    <div className="flex justify-between text-xs font-bold">
+                      <span className="truncate w-3/4 text-slate-700">{item.product.name}</span>
+                      <span className="text-slate-900">$ {getPrice(item.product) * item.quantity}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <div className="flex border rounded-md bg-white shadow-sm overflow-hidden">
+                        <button onClick={() => setCart(c => c.map(x => x.product.id === item.product.id ? {...x, quantity: Math.max(1, x.quantity - 1)} : x))} className="px-3 py-1 hover:bg-slate-100 text-slate-600 font-bold">-</button>
+                        <span className="px-3 py-1 font-bold text-xs bg-slate-50 border-x flex items-center justify-center min-w-[2rem]">{item.quantity}</span>
+                        <button onClick={() => addToCart(item.product)} className="px-3 py-1 hover:bg-slate-100 text-slate-600 font-bold">+</button>
+                      </div>
+                      <button onClick={() => setCart(c => c.filter(x => x.product.id !== item.product.id))} className="text-slate-300 hover:text-red-500 transition-colors bg-white rounded-full p-1 border shadow-sm"><X size={14}/></button>
+                    </div>
+                  </div>
+                ))}
+                {cart.length === 0 && (
+                  <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-2 opacity-50">
+                    <ShoppingCart size={48} />
+                    <p className="text-sm font-bold">Carrito vacío</p>
+                  </div>
+                )}
+              </div>
+              <div className="p-4 border-t bg-slate-50 space-y-3 shrink-0">
+                <div className="grid grid-cols-2 gap-2">
+                  <input className="text-xs p-2.5 border rounded-lg bg-white outline-none focus:ring-2 ring-blue-100" value={customer} onChange={e => setCustomer(e.target.value)} placeholder="Cliente"/>
+                  <input type="datetime-local" className="text-xs p-2.5 border rounded-lg bg-white outline-none focus:ring-2 ring-blue-100" value={saleDate} onChange={e => setSaleDate(e.target.value)}/>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <select className="text-xs p-2.5 border rounded-lg font-bold bg-white outline-none focus:ring-2 ring-blue-100" value={platform} onChange={e => setPlatform(e.target.value)}>
+                    {Object.keys(config.commissions).map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                  <select className="text-xs p-2.5 border rounded-lg font-bold bg-white outline-none focus:ring-2 ring-blue-100" value={payMethod} onChange={e => setPayMethod(e.target.value)}>
+                    {Object.keys(config.paymentFees).map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <select className="text-xs border p-2 rounded-lg bg-white font-bold outline-none" value={discType} onChange={e => setDiscType(e.target.value)}>
+                    <option value="fixed">$</option>
+                    <option value="percent">%</option>
+                  </select>
+                  <input type="number" className="flex-1 text-xs p-2.5 border rounded-lg font-bold bg-white outline-none focus:ring-2 ring-blue-100" value={discVal} onChange={e => setDiscVal(e.target.value)} placeholder="Descuento (0.00)"/>
+                </div>
+                <div className="flex justify-between border-t border-slate-200 pt-3 items-end">
+                  <span className="text-sm font-bold text-slate-500 uppercase tracking-wider">Total</span>
+                  <span className="text-3xl font-black text-blue-600">$ {total}</span>
+                </div>
+                <button onClick={handleSell} disabled={!cart.length} className="w-full py-3.5 bg-blue-600 text-white rounded-xl font-black tracking-widest uppercase hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed shadow-lg shadow-blue-600/30 transition-all active:scale-[0.98]">
+                  Cobrar e Imprimir
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      // ─── InventoryView ───────────────────────────────────────────────────────
+      const InventoryView = () => {
+        const [form, setForm] = useState({ id: null, name: '', barcode: '', category: '', brand: '', supplier: '', cost: '', priceLocal: '', priceRedes: '', pricePlat: '', stock: '' });
+        const [isEdit, setIsEdit] = useState(false);
+        const [search, setSearch] = useState('');
+        const [cat, setCat] = useState('Todas');
+        const categories = ['Todas', ...new Set(products.map(p => p.category))].sort();
+        const fileInputRef = useRef(null);
+
+        const save = (e) => {
+          e.preventDefault();
+          const p = { ...form, id: form.id || Date.now(), cost: Number(form.cost), priceLocal: Number(form.priceLocal), priceRedes: Number(form.priceRedes), pricePlat: Number(form.pricePlat), stock: Number(form.stock) };
+          const up = isEdit ? products.map(x => x.id === form.id ? p : x) : [...products, p];
+          setProducts(up); syncStore('products', up);
+          setForm({ id: null, name: '', barcode: '', category: '', brand: '', supplier: '', cost: '', priceLocal: '', priceRedes: '', pricePlat: '', stock: '' });
+          setIsEdit(false); showToast(isEdit ? 'Producto Actualizado' : 'Producto Guardado');
+        };
+
+        const handleImportCSV = (e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            const text = evt.target.result;
+            const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+            if (lines.length < 2) return showToast('El archivo está vacío o no tiene el formato correcto.', 'error');
+            const headers = lines[0].split(';').map(h => h.replace(/["\uFEFF]/g, '').trim());
+            const importedProducts = lines.slice(1).map((line, idx) => {
+              const values = line.split(';');
+              const obj = {};
+              headers.forEach((h, i) => {
+                let val = values[i] ? values[i].replace(/"/g, '') : '';
+                if (['cost', 'priceLocal', 'priceRedes', 'pricePlat', 'stock'].includes(h)) val = Number(val) || 0;
+                obj[h] = val;
+              });
+              if (!obj.id) obj.id = Date.now() + idx;
+              return obj;
+            });
+            const newProducts = [...products];
+            let addedCount = 0, updatedCount = 0;
+            importedProducts.forEach(ip => {
+              const existingIdx = newProducts.findIndex(p =>
+                (p.barcode && ip.barcode && p.barcode === ip.barcode) ||
+                (p.name.toLowerCase() === ip.name?.toLowerCase())
+              );
+              if (existingIdx >= 0) {
+                newProducts[existingIdx] = { ...newProducts[existingIdx], ...ip, id: newProducts[existingIdx].id, stock: newProducts[existingIdx].stock + (ip.stock || 0) };
+                updatedCount++;
+              } else {
+                if (ip.name) { newProducts.push(ip); addedCount++; }
+              }
+            });
+            setProducts(newProducts);
+            syncStore('products', newProducts);
+            showToast(`Importación exitosa. ${addedCount} nuevos, ${updatedCount} actualizados.`);
+          };
+          reader.readAsText(file);
+          e.target.value = '';
+        };
+
+        const groupedProducts = useMemo(() => {
+          const filtered = products.filter(p =>
+            (p.name.toLowerCase().includes(search.toLowerCase()) || (p.barcode && p.barcode.includes(search)) || (p.brand && p.brand.toLowerCase().includes(search.toLowerCase()))) &&
+            (cat === 'Todas' || p.category === cat)
+          );
+          const groups = {};
+          filtered.forEach(p => { if (!groups[p.category]) groups[p.category] = []; groups[p.category].push(p); });
+          const sortedCats = Object.keys(groups).sort();
+          sortedCats.forEach(c => groups[c].sort((a,b) => a.name.localeCompare(b.name)));
+          return { groups, sortedCats };
+        }, [products, search, cat]);
+
+        return (
+          <div className="flex flex-col lg:flex-row h-full gap-6 overflow-hidden">
+            <div className="w-full lg:w-[340px] bg-white border rounded-xl p-5 shadow-sm overflow-y-auto shrink-0">
+              <h3 className="font-bold text-slate-800 mb-4 border-b pb-3 flex items-center gap-2">
+                {isEdit ? <Edit size={18} className="text-blue-500"/> : <Plus size={18} className="text-emerald-500"/>}
+                {isEdit ? 'Editar Artículo' : 'Nuevo Artículo'}
+              </h3>
+              <form onSubmit={save} className="space-y-4">
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Nombre del Producto</label>
+                  <input className="w-full p-2 border rounded-lg text-sm bg-slate-50 focus:bg-white outline-none focus:ring-2 focus:ring-blue-100" required value={form.name} onChange={e => setForm({...form, name: e.target.value})}/>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Código de Barras</label>
+                  <input className="w-full p-2 border rounded-lg text-sm bg-blue-50 outline-none focus:ring-2 focus:ring-blue-200" value={form.barcode} onChange={e => setForm({...form, barcode: e.target.value})}/>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Categoría</label>
+                    <input className="w-full p-2 border rounded-lg text-sm bg-slate-50 outline-none focus:bg-white" required value={form.category} onChange={e => setForm({...form, category: e.target.value})}/>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Marca</label>
+                    <input className="w-full p-2 border rounded-lg text-sm bg-slate-50 outline-none focus:bg-white" value={form.brand} onChange={e => setForm({...form, brand: e.target.value})}/>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Stock</label>
+                    <input type="number" className="w-full p-2 border rounded-lg text-sm bg-slate-50 outline-none focus:bg-white font-bold" required value={form.stock} onChange={e => setForm({...form, stock: e.target.value})}/>
+                  </div>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-slate-500">Proveedor</label>
+                  <input className="w-full p-2 border rounded-lg text-sm bg-slate-50 outline-none focus:bg-white" value={form.supplier} onChange={e => setForm({...form, supplier: e.target.value})}/>
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[10px] font-black uppercase tracking-wider text-red-500">Costo Unitario ($)</label>
+                  <input type="number" className="w-full p-2 border-red-100 rounded-lg text-sm font-bold bg-red-50 outline-none focus:ring-2 focus:ring-red-200" required value={form.cost} onChange={e => setForm({...form, cost: e.target.value})}/>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="space-y-1">
+                    <label className="text-[9px] font-black uppercase tracking-wider text-blue-600">P. Local</label>
+                    <input type="number" className="w-full p-2 border-blue-100 rounded-lg text-sm font-bold bg-blue-50 outline-none" value={form.priceLocal} onChange={e => setForm({...form, priceLocal: e.target.value})}/>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] font-black uppercase tracking-wider text-purple-600">P. Redes</label>
+                    <input type="number" className="w-full p-2 border-purple-100 rounded-lg text-sm font-bold bg-purple-50 outline-none" value={form.priceRedes} onChange={e => setForm({...form, priceRedes: e.target.value})}/>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] font-black uppercase tracking-wider text-orange-500">P. Plat</label>
+                    <input type="number" className="w-full p-2 border-orange-100 rounded-lg text-sm font-bold bg-orange-50 outline-none" value={form.pricePlat} onChange={e => setForm({...form, pricePlat: e.target.value})}/>
+                  </div>
+                </div>
+                <div className="pt-2">
+                  <button className="w-full py-3 bg-slate-900 text-white rounded-lg font-black text-xs uppercase tracking-widest hover:bg-slate-800 transition-colors shadow-lg">
+                    {isEdit ? 'Actualizar Artículo' : 'Guardar Artículo'}
+                  </button>
+                  {isEdit && (
+                    <button type="button" onClick={() => { setForm({ id: null, name: '', barcode: '', category: '', brand: '', supplier: '', cost: '', priceLocal: '', priceRedes: '', pricePlat: '', stock: '' }); setIsEdit(false); }} className="w-full py-2 mt-2 text-xs font-bold text-slate-500 hover:text-slate-700">
+                      Cancelar Edición
+                    </button>
+                  )}
+                </div>
+              </form>
+            </div>
+
+            <div className="flex-1 flex flex-col gap-4 overflow-hidden">
+              <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+                <div className="flex-1 bg-white border rounded-xl px-4 flex items-center gap-2 shadow-sm">
+                  <Search size={18} className="text-slate-400"/>
+                  <input placeholder="Filtrar por nombre, categoría, marca o código..." className="w-full py-3 text-sm outline-none" value={search} onChange={e => setSearch(e.target.value)}/>
+                </div>
+                <div className="flex gap-2">
+                  <select className="bg-white border rounded-xl px-4 text-xs font-bold shadow-sm outline-none" value={cat} onChange={e => setCat(e.target.value)}>
+                    {categories.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                  <input type="file" accept=".csv" className="hidden" ref={fileInputRef} onChange={handleImportCSV} />
+                  <button onClick={() => fileInputRef.current.click()} className="bg-blue-600 hover:bg-blue-700 text-white px-4 rounded-xl flex items-center justify-center gap-2 font-bold text-xs shadow-md transition-colors" title="Importar desde CSV">
+                    <Upload size={16}/> <span className="hidden sm:inline">Importar</span>
+                  </button>
+                  <button onClick={() => exportToCSV('inventario.csv', products)} className="bg-emerald-600 hover:bg-emerald-700 text-white px-4 rounded-xl flex items-center justify-center gap-2 font-bold text-xs shadow-md transition-colors" title="Exportar a CSV">
+                    <FileSpreadsheet size={16}/> <span className="hidden sm:inline">Exportar</span>
+                  </button>
+                </div>
+              </div>
+              <div className="bg-white border rounded-xl overflow-hidden flex-1 flex flex-col shadow-sm">
+                <div className="overflow-x-auto flex-1">
+                  <table className="w-full text-left text-xs whitespace-nowrap min-w-[800px]">
+                    <thead className="bg-slate-50 border-b font-bold text-slate-500 sticky top-0 z-10 shadow-sm">
+                      <tr>
+                        <th className="p-4 uppercase tracking-wider">Artículo / Marca</th>
+                        <th className="p-4 uppercase tracking-wider">Proveedor</th>
+                        <th className="p-4 text-right uppercase tracking-wider">Costo</th>
+                        <th className="p-4 text-right uppercase tracking-wider">Venta Local</th>
+                        <th className="p-4 text-right uppercase tracking-wider text-purple-600">Venta Redes</th>
+                        <th className="p-4 text-center uppercase tracking-wider">Stock</th>
+                        <th className="p-4 text-center">Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y overflow-y-auto">
+                      {groupedProducts.sortedCats.map(category => (
+                        <React.Fragment key={category}>
+                          <tr className="bg-slate-100/50">
+                            <td colSpan="7" className="p-3">
+                              <div className="flex items-center gap-3">
+                                <span className="font-black text-slate-500 tracking-widest uppercase text-xs">{category}</span>
+                                <div className="h-px bg-slate-200 flex-1"></div>
+                              </div>
+                            </td>
+                          </tr>
+                          {groupedProducts.groups[category].map(p => (
+                            <tr key={p.id} className="hover:bg-slate-50/80 transition-colors group">
+                              <td className="p-4 pl-6">
+                                <p className="font-bold text-slate-800 text-sm">{p.name}</p>
+                                <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">{p.brand ? `${p.brand} | ` : ''}{p.barcode || 'S/C'}</span>
+                              </td>
+                              <td className="p-4 text-slate-600 font-bold uppercase text-[10px]">{p.supplier || '-'}</td>
+                              <td className="p-4 text-right text-red-500 font-medium">$ {p.cost}</td>
+                              <td className="p-4 text-right font-black text-blue-600">$ {p.priceLocal}</td>
+                              <td className="p-4 text-right font-black text-purple-600">$ {p.priceRedes}</td>
+                              <td className="p-4 text-center font-black">
+                                <span className={`px-2 py-1 rounded-md border ${p.stock < 5 ? 'bg-red-50 text-red-600 border-red-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}`}>{p.stock}</span>
+                              </td>
+                              <td className="p-4 text-center space-x-1">
+                                <button onClick={() => setInputDialog({ isOpen: true, msg: `Ingresar cantidad a sumar al stock de "${p.name}":`, val: '', onConfirm: (val) => { const qty = Number(val); if (qty && qty > 0) { const up = products.map(x => x.id === p.id ? {...x, stock: x.stock + qty} : x); setProducts(up); syncStore('products', up); showToast(`Se sumaron ${qty} unidades a ${p.name}`); } } })} className="p-2 text-emerald-600 bg-emerald-50 hover:bg-emerald-100 hover:text-emerald-700 rounded-lg transition-colors shadow-sm" title="Sumar Stock">
+                                  <Plus size={14} className="stroke-[3]"/>
+                                </button>
+                                <button onClick={() => { setForm(p); setIsEdit(true); }} className="p-2 text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"><Edit size={14}/></button>
+                                <button onClick={() => setConfirmDialog({ isOpen: true, msg: `¿Borrar permanentemente "${p.name}" del inventario?`, onConfirm: () => { const up = products.filter(x => x.id !== p.id); setProducts(up); syncStore('products', up); showToast('Producto eliminado'); } })} className="p-2 text-red-500 bg-red-50 hover:bg-red-100 rounded-lg transition-colors">
+                                  <Trash2 size={14}/>
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </React.Fragment>
+                      ))}
+                      {groupedProducts.sortedCats.length === 0 && (
+                        <tr><td colSpan="7" className="text-center p-8 text-slate-400 font-medium">No se encontraron productos en el inventario.</td></tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      // ─── ReportsView ─────────────────────────────────────────────────────────
+      const ReportsView = () => {
+        const [range, setRange] = useState('Mes');
+        const [dateFrom, setDateFrom] = useState('');
+        const [dateTo, setDateTo] = useState('');
+        const [filterPlat, setFilterPlat] = useState('Todas');
+        const [filterPay, setFilterPay] = useState('Todos');
+        const [filterClient, setFilterClient] = useState('');
+
+        const deleteSaleAndRestoreStock = (saleToDelete) => {
+          const updatedProducts = products.map(p => {
+            const itemInSale = saleToDelete.items.find(i => i.product.id === p.id);
+            return itemInSale ? { ...p, stock: p.stock + itemInSale.quantity } : p;
+          });
+          setProducts(updatedProducts);
+          syncStore('products', updatedProducts);
+          const remainingSales = sales.filter(x => x.id !== saleToDelete.id);
+          const reindexedSales = remainingSales
+            .sort((a, b) => a.id - b.id)
+            .map((s, index) => ({ ...s, ticketNumber: index + 1, ticketId: `V${index + 1}` }));
+          setSales(reindexedSales);
+          syncStore('sales', reindexedSales);
+          showToast(`Venta anulada, stock restaurado y tickets re-indexados`);
+        };
+
+        const filteredSales = useMemo(() => {
+          const now = new Date();
+          let result = sales;
+          if (range === 'Hoy') result = result.filter(s => new Date(s.isoDate).toDateString() === now.toDateString());
+          else if (range === 'Semana') result = result.filter(s => (now - new Date(s.isoDate)) < 7 * 24 * 60 * 60 * 1000);
+          else if (range === 'Mes') result = result.filter(s => { const d = new Date(s.isoDate); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); });
+          else if (range === 'Personalizado') {
+            if (dateFrom) result = result.filter(s => new Date(s.isoDate) >= new Date(dateFrom));
+            if (dateTo) { const end = new Date(dateTo); end.setHours(23, 59, 59); result = result.filter(s => new Date(s.isoDate) <= end); }
+          }
+          if (filterPlat !== 'Todas') result = result.filter(s => s.plataforma === filterPlat);
+          if (filterPay !== 'Todos') result = result.filter(s => s.metodo_pago === filterPay);
+          if (filterClient) result = result.filter(s => s.cliente.toLowerCase().includes(filterClient.toLowerCase()));
+          return result;
+        }, [sales, range, dateFrom, dateTo, filterPlat, filterPay, filterClient]);
+
+        const stats = useMemo(() => {
+          let bruto = 0, neta = 0, comisiones = 0, totalVendidos = 0;
+          const ticketsPorPlat = {};
+          filteredSales.forEach(s => {
+            bruto += s.total_final; neta += s.ganancia_neta; comisiones += (s.comision_total || 0);
+            totalVendidos += s.items.reduce((sum, i) => sum + i.quantity, 0);
+            ticketsPorPlat[s.plataforma] = (ticketsPorPlat[s.plataforma] || 0) + 1;
+          });
+          const count = filteredSales.length;
+          const margen = bruto > 0 ? ((neta / bruto) * 100).toFixed(1) : 0;
+          const ticketPromedio = count > 0 ? (bruto / count).toFixed(2) : 0;
+          return { bruto, neta, comisiones, margen, totalVendidos, count, ticketPromedio, ticketsPorPlat };
+        }, [filteredSales]);
+
+        const exportDesglosadoBI = () => {
+          const flat = [];
+          filteredSales.forEach(s => {
+            s.items.forEach(item => {
+              flat.push({
+                ID_Ticket: s.ticketId || s.id, Fecha_Hora: s.fecha, Cliente: s.cliente,
+                Canal: s.plataforma, Medio_Pago: s.metodo_pago,
+                Producto: item.product.name, Categoria: item.product.category,
+                Marca: item.product.brand || '', Cantidad: item.quantity,
+                Venta_Unit: Number((item.price).toFixed(2)), Costo_Unit: Number((item.product.cost).toFixed(2)),
+                Subtotal_Ticket: Number((s.subtotal).toFixed(2)), Descuento_Ticket: Number((s.descuento_aplicado).toFixed(2)),
+                Comision_Plat_Ticket: Number((s.comision_plataforma || 0).toFixed(2)),
+                IVA_Plat_Ticket: Number((s.iva_comision_plataforma || 0).toFixed(2)),
+                Comision_Pago_Ticket: Number((s.comision_metodo_pago || 0).toFixed(2)),
+                IVA_Pago_Ticket: Number((s.iva_comision_metodo_pago || 0).toFixed(2)),
+                Comision_Total_Ticket: Number((s.comision_total || 0).toFixed(2)),
+                Total_Final_Ticket: Number((s.total_final).toFixed(2)),
+                Costo_Total_Ticket: Number((s.costo_total).toFixed(2)),
+                Ganancia_Neta_Ticket: Number((s.ganancia_neta).toFixed(2)),
+                Ganancia_Neta_Item: Number(((item.price - item.product.cost) * item.quantity).toFixed(2))
+              });
+            });
+          });
+          exportToCSV(`BI_Ventas_Desglosado.csv`, flat);
+        };
+
+        return (
+          <div className="flex flex-col gap-6 h-full overflow-y-auto pb-10">
+            <div className="flex flex-col gap-4 bg-white p-5 rounded-xl border shadow-sm shrink-0">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                <h2 className="font-black text-xl text-slate-800 flex items-center gap-2"><BarChart3 className="text-blue-600"/> Reportes & BI</h2>
+                <div className="flex flex-wrap items-center gap-4 w-full sm:w-auto justify-between sm:justify-end">
+                  <div className="bg-slate-100 p-1 rounded-lg flex gap-1">
+                    {['Hoy', 'Semana', 'Mes', 'Todo', 'Personalizado'].map(r => (
+                      <button key={r} onClick={() => setRange(r)} className={`px-4 py-1.5 text-xs font-bold rounded-md transition-colors ${range === r ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}>{r}</button>
+                    ))}
+                  </div>
+                  <button onClick={exportDesglosadoBI} className="bg-blue-600 text-white px-5 py-2.5 rounded-xl font-bold hover:bg-blue-700 shadow-md flex items-center justify-center gap-2 transition-all">
+                    <FileSpreadsheet size={18}/> Exportar Detalle BI
+                  </button>
+                </div>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-3 border-t">
+                {range === 'Personalizado' && (
+                  <>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[9px] font-black uppercase text-slate-400">Desde</label>
+                      <input type="date" className="text-xs p-2 border rounded-lg bg-slate-50 outline-none" value={dateFrom} onChange={e => setDateFrom(e.target.value)} />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      <label className="text-[9px] font-black uppercase text-slate-400">Hasta</label>
+                      <input type="date" className="text-xs p-2 border rounded-lg bg-slate-50 outline-none" value={dateTo} onChange={e => setDateTo(e.target.value)} />
+                    </div>
+                  </>
+                )}
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] font-black uppercase text-slate-400">Cliente</label>
+                  <input placeholder="Buscar cliente..." className="text-xs p-2 border rounded-lg bg-slate-50 outline-none" value={filterClient} onChange={e => setFilterClient(e.target.value)} />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] font-black uppercase text-slate-400">Canal / Plataforma</label>
+                  <select className="text-xs p-2 border rounded-lg bg-slate-50 font-bold outline-none" value={filterPlat} onChange={e => setFilterPlat(e.target.value)}>
+                    <option value="Todas">Todas</option>
+                    {Object.keys(config.commissions).map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] font-black uppercase text-slate-400">Medio de Pago</label>
+                  <select className="text-xs p-2 border rounded-lg bg-slate-50 font-bold outline-none" value={filterPay} onChange={e => setFilterPay(e.target.value)}>
+                    <option value="Todos">Todos</option>
+                    {Object.keys(config.paymentFees).map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 shrink-0">
+              <div className="bg-white p-5 rounded-xl border shadow-sm hover:border-blue-200 transition-colors col-span-2 lg:col-span-1">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Venta Total (Bruto)</p>
+                <p className="text-3xl font-black text-slate-800 mt-1">$ {stats.bruto.toLocaleString()}</p>
+              </div>
+              <div className="bg-white p-5 rounded-xl border border-emerald-100 bg-emerald-50/30 col-span-2 lg:col-span-1">
+                <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest">Ganancia Real ($)</p>
+                <p className="text-3xl font-black text-emerald-600 mt-1">$ {stats.neta.toLocaleString()}</p>
+              </div>
+              <div className="bg-white p-5 rounded-xl border border-red-100 bg-red-50/30">
+                <p className="text-[10px] font-black text-red-600 uppercase tracking-widest">Comisiones / Costos (Total)</p>
+                <p className="text-2xl font-black text-red-600 mt-1">$ {stats.comisiones.toLocaleString()}</p>
+              </div>
+              <div className="bg-white p-5 rounded-xl border border-blue-100 bg-blue-50/30">
+                <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest">Margen de Rentabilidad</p>
+                <p className="text-2xl font-black text-blue-600 mt-1">{stats.margen}%</p>
+              </div>
+              <div className="bg-white p-5 rounded-xl border shadow-sm flex flex-col justify-center">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cant. Tickets / Ventas</p>
+                <p className="text-3xl font-black text-blue-600 mt-1">{stats.count}</p>
+              </div>
+              <div className="bg-white p-5 rounded-xl border shadow-sm">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Ticket Promedio</p>
+                <p className="text-2xl font-black text-slate-800 mt-1">$ {stats.ticketPromedio}</p>
+              </div>
+              <div className="bg-white p-5 rounded-xl border shadow-sm">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Cant. Items Vendidos</p>
+                <p className="text-2xl font-black text-slate-800 mt-1">{stats.totalVendidos}</p>
+              </div>
+              <div className="bg-white p-4 rounded-xl border shadow-sm col-span-2 lg:col-span-1 flex flex-col justify-center">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 border-b pb-1">Tickets por Plataforma</p>
+                <div className="flex gap-4 flex-wrap">
+                  {Object.entries(stats.ticketsPorPlat).map(([plat, count]) => (
+                    <div key={plat} className="flex items-center gap-1.5">
+                      <span className="text-xs font-bold text-slate-600">{plat}:</span>
+                      <span className="text-sm font-black text-blue-600 bg-blue-50 px-2 py-0.5 rounded">{count}</span>
+                    </div>
+                  ))}
+                  {Object.keys(stats.ticketsPorPlat).length === 0 && <span className="text-xs font-bold text-slate-400">Sin datos</span>}
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-white border rounded-xl overflow-hidden shadow-sm flex-1 flex flex-col">
+              <div className="overflow-x-auto flex-1">
+                <table className="w-full text-[11px] text-left min-w-[1200px] whitespace-nowrap">
+                  <thead className="bg-slate-50 text-slate-500 font-bold border-b sticky top-0 shadow-sm z-10">
+                    <tr>
+                      <th className="p-3 uppercase tracking-wider">Venta / Fecha</th>
+                      <th className="p-3 uppercase tracking-wider">Cliente</th>
+                      <th className="p-3 uppercase tracking-wider">Canal / Pago</th>
+                      <th className="p-3 uppercase tracking-wider w-48">Productos</th>
+                      <th className="p-3 text-right uppercase tracking-wider">Subt / Desc</th>
+                      <th className="p-3 text-right uppercase tracking-wider text-red-500">Com. Plat + IVA</th>
+                      <th className="p-3 text-right uppercase tracking-wider text-orange-500">Com. Pago + IVA</th>
+                      <th className="p-3 text-right uppercase tracking-wider text-blue-600">Total Final</th>
+                      <th className="p-3 text-right uppercase tracking-wider text-emerald-600">Ganancia</th>
+                      <th className="p-3"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y overflow-y-auto">
+                    {filteredSales.slice().reverse().map(s => (
+                      <tr key={s.id} className="hover:bg-slate-50 transition-colors group">
+                        <td className="p-3">
+                          <div className="font-black text-blue-600 text-xs mb-0.5">{s.ticketId || 'S/T'}</div>
+                          <div className="text-[9px] text-slate-500 font-medium">{s.fecha}</div>
+                        </td>
+                        <td className="p-3 font-bold text-slate-800">{s.cliente}</td>
+                        <td className="p-3">
+                          <div className="flex flex-col gap-1">
+                            <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded w-fit font-black uppercase text-[9px] border shadow-sm">{s.plataforma}</span>
+                            <span className="text-[10px] font-bold text-slate-500">{s.metodo_pago}</span>
+                          </div>
+                        </td>
+                        <td className="p-3 text-slate-600 italic whitespace-normal min-w-[150px]">
+                          {s.items.map(i => `${i.product.name} (x${i.quantity})`).join(', ')}
+                        </td>
+                        <td className="p-3 text-right">
+                          <div className="font-bold text-slate-600">$ {s.subtotal}</div>
+                          {s.descuento_aplicado > 0 && <div className="text-[9px] font-bold text-orange-500">Desc: -$ {s.descuento_aplicado}</div>}
+                        </td>
+                        <td className="p-3 text-right">
+                          <div className="font-bold text-red-500">-$ {(s.comision_plataforma || 0).toFixed(2)}</div>
+                          <div className="text-[9px] text-red-400">IVA: -$ {(s.iva_comision_plataforma || 0).toFixed(2)}</div>
+                        </td>
+                        <td className="p-3 text-right">
+                          <div className="font-bold text-orange-500">-$ {(s.comision_metodo_pago || 0).toFixed(2)}</div>
+                          <div className="text-[9px] text-orange-400">IVA: -$ {(s.iva_comision_metodo_pago || 0).toFixed(2)}</div>
+                        </td>
+                        <td className="p-3 text-right font-black text-blue-600 text-sm bg-blue-50/30">$ {s.total_final}</td>
+                        <td className="p-3 text-right font-black text-emerald-600 text-sm bg-emerald-50/30">$ {s.ganancia_neta.toFixed(2)}</td>
+                        <td className="p-3 text-center">
+                          <button onClick={() => setConfirmDialog({ isOpen: true, msg: `¿Estás seguro de anular la venta ${s.ticketId || ''}? Esto devolverá el stock y re-organizará el número de los demás tickets.`, onConfirm: () => deleteSaleAndRestoreStock(s) })} className="text-red-400 bg-red-50 hover:bg-red-500 hover:text-white p-2 rounded-lg transition-colors shadow-sm" title="Anular venta y Restaurar Stock">
+                            <Trash2 size={14}/>
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                    {filteredSales.length === 0 && (
+                      <tr><td colSpan="10" className="text-center p-8 text-slate-400 font-medium text-sm">No hay ventas registradas con los filtros actuales.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      // ─── ConfigView ──────────────────────────────────────────────────────────
+      const ConfigView = () => {
+        const [localConfig, setLocalConfig] = useState(config);
+        const handleSave = () => { setConfig(localConfig); syncStore('config', localConfig); showToast('Configuración Guardada'); };
+        return (
+          <div className="max-w-4xl bg-white border rounded-2xl shadow-sm p-8 space-y-8 animate-in fade-in duration-300 mx-auto mt-4 overflow-y-auto">
+            <h2 className="text-2xl font-black border-b pb-4 flex items-center gap-3 text-slate-800">
+              <Settings className="text-blue-600"/> Ajustes del Sistema
+            </h2>
+            <div className="space-y-4">
+              <label className="text-xs font-black text-slate-400 uppercase tracking-widest">Nombre de la Empresa (Ticket)</label>
+              <input className="w-full p-4 bg-slate-50 border border-slate-200 rounded-xl font-bold text-lg outline-none focus:ring-2 focus:ring-blue-100 focus:bg-white transition-all" value={localConfig.storeName} onChange={e => setLocalConfig({...localConfig, storeName: e.target.value})}/>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+              <div className="space-y-4">
+                <h3 className="font-bold text-sm text-slate-500 uppercase flex items-center gap-2 border-b pb-2"><Truck size={16}/> Comisiones Delivery (%)</h3>
+                {Object.entries(localConfig.commissions).map(([key, val]) => (
+                  <div key={key} className="flex flex-col gap-2 bg-slate-50 p-3 rounded-xl border">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm font-bold text-slate-700">{key}</span>
+                      <input type="number" className="w-20 text-right font-black p-1.5 bg-white border rounded-md outline-none focus:ring-2 ring-blue-100" value={val} onChange={e => setLocalConfig({...localConfig, commissions: {...localConfig.commissions, [key]: Number(e.target.value)}})}/>
+                    </div>
+                    {(key === 'Rappi' || key === 'PedidosYa') && (
+                      <div className="flex justify-between items-center border-t border-slate-200 pt-2 mt-1">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">IVA s/ Comisión (%)</span>
+                        <input type="number" className="w-16 text-right font-bold p-1 bg-white border rounded-md outline-none focus:ring-2 ring-blue-100 text-xs" value={localConfig.commissionIVA?.[key] || 0} onChange={e => setLocalConfig({...localConfig, commissionIVA: { ...localConfig.commissionIVA, [key]: Number(e.target.value) }})}/>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className="space-y-4">
+                <h3 className="font-bold text-sm text-slate-500 uppercase flex items-center gap-2 border-b pb-2"><Save size={16}/> Cargos por Método de Pago (%)</h3>
+                {Object.entries(localConfig.paymentFees).map(([key, val]) => (
+                  <div key={key} className="flex flex-col gap-2 bg-slate-50 p-3 rounded-xl border">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm font-bold text-slate-700">{key}</span>
+                      <input type="number" className="w-20 text-right font-black p-1.5 bg-white border rounded-md outline-none focus:ring-2 ring-blue-100" value={val} onChange={e => setLocalConfig({...localConfig, paymentFees: {...localConfig.paymentFees, [key]: Number(e.target.value)}})}/>
+                    </div>
+                    {(key === 'Tarjeta' || key === 'MercadoPago') && (
+                      <div className="flex justify-between items-center border-t border-slate-200 pt-2 mt-1">
+                        <span className="text-[10px] font-bold text-slate-500 uppercase">IVA s/ Cargo (%)</span>
+                        <input type="number" className="w-16 text-right font-bold p-1 bg-white border rounded-md outline-none focus:ring-2 ring-blue-100 text-xs" value={localConfig.paymentIVA?.[key] || 0} onChange={e => setLocalConfig({...localConfig, paymentIVA: { ...localConfig.paymentIVA, [key]: Number(e.target.value) }})}/>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="pt-4 border-t">
+              <button onClick={handleSave} className="w-full py-4 bg-slate-900 text-white rounded-xl font-black text-lg hover:bg-slate-800 shadow-lg transition-all active:scale-[0.98] uppercase tracking-widest">Guardar Cambios</button>
+            </div>
+          </div>
+        );
+      };
+
+      // ─── Loader ──────────────────────────────────────────────────────────────
+      if (isLoading) {
+        return (
+          <div className="h-screen w-full bg-slate-950 flex flex-col items-center justify-center text-white space-y-4">
+            <ShoppingCart size={48} className="text-blue-500 animate-bounce" />
+            <div className="font-black animate-pulse tracking-widest text-xl flex items-center gap-2">
+              INICIANDO <span className="text-blue-500">PRO</span>POS
+            </div>
+          </div>
+        );
+      }
+
+      // ─── Layout Principal ─────────────────────────────────────────────────────
+      return (
+        <div className="min-h-screen bg-slate-100 flex flex-col md:flex-row text-slate-900 font-sans">
+          <ConfirmModal />
+          <InputModal />
+
+          {toast && (
+            <div className={`fixed top-8 right-4 md:right-8 z-[100] px-6 py-4 rounded-xl font-bold shadow-2xl animate-in slide-in-from-top-4 md:slide-in-from-right-8 duration-300 border flex items-center gap-3 ${toast.type === 'error' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-slate-900 text-white border-slate-700'}`}>
+              {toast.msg.toUpperCase()}
+            </div>
+          )}
+
+          {/* Navegación Desktop */}
+          <nav className="w-64 bg-slate-950 text-white hidden md:flex flex-col shadow-2xl shrink-0 z-20 relative">
+            <div className="p-8 border-b border-white/10">
+              <h1 className="text-3xl font-black tracking-tighter italic"><span className="text-blue-500">PRO</span>POS</h1>
+              <p className="text-[10px] text-slate-400 font-bold uppercase mt-2 tracking-widest truncate">{config.storeName}</p>
+            </div>
+            <div className="flex-1 px-4 py-6 space-y-2 overflow-y-auto">
+              {[
+                { id: 'pos', icon: ShoppingCart, label: 'Punto de Venta' },
+                { id: 'inventory', icon: Package, label: 'Inventario' },
+                { id: 'reports', icon: BarChart3, label: 'Reportes' },
+                { id: 'config', icon: Settings, label: 'Ajustes' }
+              ].map(tab => (
+                <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`w-full flex items-center gap-3 px-4 py-3.5 rounded-xl font-bold transition-all duration-200 ${activeTab === tab.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/50 translate-x-1' : 'text-slate-400 hover:bg-white/5 hover:text-white'}`}>
+                  <tab.icon size={20} />
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+          </nav>
+
+          {/* Contenido */}
+          <main className="flex-1 overflow-hidden p-4 md:p-6 lg:p-8 flex flex-col pb-24 md:pb-8">
+            {activeTab === 'pos' && <POSView />}
+            {activeTab === 'inventory' && <InventoryView />}
+            {activeTab === 'reports' && <ReportsView />}
+            {activeTab === 'config' && <ConfigView />}
+          </main>
+
+          {/* Navegación Mobile */}
+          <nav className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t flex justify-around p-2 pb-safe z-50 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+            {[
+              { id: 'pos', icon: ShoppingCart, label: 'Vender' },
+              { id: 'inventory', icon: Package, label: 'Stock' },
+              { id: 'reports', icon: BarChart3, label: 'Reportes' },
+              { id: 'config', icon: Settings, label: 'Ajustes' }
+            ].map(tab => (
+              <button key={tab.id} onClick={() => setActiveTab(tab.id)} className={`flex flex-col items-center gap-1 p-2 min-w-[4rem] transition-colors ${activeTab === tab.id ? 'text-blue-600' : 'text-slate-400'}`}>
+                <tab.icon size={20} className={activeTab === tab.id ? 'fill-blue-50' : ''} />
+                <span className="text-[10px] font-bold">{tab.label}</span>
+              </button>
+            ))}
+          </nav>
+        </div>
+      );
+    }
+
+    // ─── Render ───────────────────────────────────────────────────────────────
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+
+    // ─── Service Worker ───────────────────────────────────────────────────────
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js').then(reg => {
+          console.log('SW registrado:', reg.scope);
+        }).catch(err => {
+          console.warn('SW no pudo registrarse:', err);
+        });
+      });
+    }
+  </script>
+</body>
+</html>
